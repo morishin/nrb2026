@@ -55,6 +55,13 @@ struct AuthUser(Uuid);
 
 #[tokio::main]
 async fn main() {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,tower_http=info")),
+        )
+        .init();
+
     let dsn = std::env::var("DATABASE_URL")
         .unwrap_or_else(|_| "mysql://isucon:isucon@127.0.0.1:3306/nrb2026".to_string());
 
@@ -131,7 +138,13 @@ async fn main() {
         app = app.fallback_service(serve);
     }
 
-    let app = app.with_state(state);
+    let app = app.with_state(state).layer(
+        tower_http::trace::TraceLayer::new_for_http().on_response(
+            tower_http::trace::DefaultOnResponse::new()
+                .level(tracing::Level::INFO)
+                .latency_unit(tower_http::LatencyUnit::Millis),
+        ),
+    );
 
     // nrb2026 では nginx を置かず axum が直接 SPA + API を配信する設計のため、
     // 本番 (= mitamae の systemd unit) では PORT=80 + AmbientCapabilities=CAP_NET_BIND_SERVICE

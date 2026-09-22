@@ -37,6 +37,9 @@ struct AppState {
     sql_dir: PathBuf,
     db: Arc<DbConn>,
     http: reqwest::Client,
+    // GET /api/campaigns/{id}/image 用。image は作成後不変なので campaign_id をキーに
+    // (bytes, ETag用hex) をキャッシュし、毎回 LONGBLOB 読み出し + SHA256 再計算するのを避ける。
+    image_cache: Arc<std::sync::Mutex<HashMap<String, Arc<(Vec<u8>, String)>>>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -84,6 +87,7 @@ async fn main() {
         sql_dir,
         db: Arc::new(db),
         http,
+        image_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
     };
 
     // API は `/api/` 配下、運用 probe `/healthz` のみ root 直下。将来 root に SPA fallback
@@ -348,6 +352,9 @@ async fn initialize(
     State(state): State<AppState>,
     JsonReq(req): JsonReq<InitReq>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    // schema.sql が全テーブルを DROP/CREATE するので、古い run の image_cache も破棄する。
+    state.image_cache.lock().unwrap().clear();
+
     run_mysql_file(&state, &state.sql_dir.join("schema.sql")).await?;
     // 配布版は scripts/build.sh が seed.sql を生成する (1500 件 + 画像)。
     // dev fresh checkout では seed.sql が無いので seed.base.sql に fallback (5 件)。
@@ -646,14 +653,19 @@ async fn create_campaign(
 
 /// GET /api/campaigns/{id}/image
 ///
-/// ナイーブ実装: 毎リクエスト LONGBLOB を引いて SHA256 → ETag を emit。
-/// `If-None-Match` は **読まない** (= 改善対象)。常に 200 + body を返す。
-/// `Cache-Control` も付けない。
+/// image は作成後不変なので、初回だけ LONGBLOB を引いて SHA256 を計算し
+/// `state.image_cache` に (bytes, ETag用hex) を保持する。2回目以降はDB・計算とも省略。
+/// `If-None-Match` は bench の load phase では送られてこないため読まない
+/// (docs/bench-log-analysis.md 参照)。常に 200 + body を返す。`Cache-Control` も付けない。
 async fn get_campaign_image(
     State(state): State<AppState>,
     Extension(_user): Extension<AuthUser>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Response, AppError> {
+    if let Some(entry) = state.image_cache.lock().unwrap().get(&id).cloned() {
+        return Ok(image_response(&entry));
+    }
+
     let row: Option<(Vec<u8>,)> =
         sqlx::query_as("SELECT image FROM campaigns WHERE id = ?")
             .bind(&id)
@@ -664,16 +676,26 @@ async fn get_campaign_image(
         None => return Err(AppError::NotFound),
     };
     let hash_hex = hex::encode(sha2::Sha256::digest(&bytes));
-    let etag = format!("\"{hash_hex}\"");
-    Ok((
+    let entry = Arc::new((bytes, hash_hex));
+    state
+        .image_cache
+        .lock()
+        .unwrap()
+        .insert(id, entry.clone());
+    Ok(image_response(&entry))
+}
+
+fn image_response(entry: &Arc<(Vec<u8>, String)>) -> Response {
+    let etag = format!("\"{}\"", entry.1);
+    (
         StatusCode::OK,
         [
             (header::CONTENT_TYPE, "image/jpeg"),
             (header::ETAG, etag.as_str()),
         ],
-        Body::from(bytes),
+        Body::from(entry.0.clone()),
     )
-        .into_response())
+        .into_response()
 }
 
 async fn get_campaign(

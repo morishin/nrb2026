@@ -1149,19 +1149,41 @@ async fn credit_used_for_user(
     conn: &mut sqlx::MySqlConnection,
     user_id: &str,
 ) -> Result<i64, AppError> {
-    let rows: Vec<(i32, i32, i64)> = sqlx::query_as(
-        "SELECT c.price, c.goal_count, COUNT(cp2.id) AS current_count \
-         FROM campaign_participants cp \
-         JOIN campaigns c ON cp.campaign_id = c.id \
-         JOIN campaign_participants cp2 ON cp2.campaign_id = c.id \
-         WHERE cp.user_id = ? \
-         GROUP BY c.id, c.price, c.goal_count",
-    )
-    .bind(user_id)
-    .fetch_all(&mut *conn)
-    .await?;
+    // campaign_participants x campaigns x campaign_participants の self-join + GROUP BY は
+    // 参加数が少ない (= ほとんどの user) 場合、毎回 temporary table を作るぶん逆に遅くなった
+    // (bench score で実測して退行を確認した)。IN 句によるバルク取得 (最大3クエリ) に置き換える。
+    let campaign_ids: Vec<String> =
+        sqlx::query_scalar("SELECT campaign_id FROM campaign_participants WHERE user_id = ?")
+            .bind(user_id)
+            .fetch_all(&mut *conn)
+            .await?;
+    if campaign_ids.is_empty() {
+        return Ok(0);
+    }
+
+    let placeholders = vec!["?"; campaign_ids.len()].join(",");
+
+    let campaign_sql =
+        format!("SELECT id, price, goal_count FROM campaigns WHERE id IN ({placeholders})");
+    let mut q = sqlx::query_as::<_, (String, i32, i32)>(&campaign_sql);
+    for cid in &campaign_ids {
+        q = q.bind(cid);
+    }
+    let campaign_rows: Vec<(String, i32, i32)> = q.fetch_all(&mut *conn).await?;
+
+    let count_sql = format!(
+        "SELECT campaign_id, COUNT(*) FROM campaign_participants \
+         WHERE campaign_id IN ({placeholders}) GROUP BY campaign_id"
+    );
+    let mut q = sqlx::query_as::<_, (String, i64)>(&count_sql);
+    for cid in &campaign_ids {
+        q = q.bind(cid);
+    }
+    let counts: HashMap<String, i64> = q.fetch_all(&mut *conn).await?.into_iter().collect();
+
     let mut credit_used: i64 = 0;
-    for (price, goal_count, current_count) in rows {
+    for (id, price, goal_count) in campaign_rows {
+        let current_count = counts.get(&id).copied().unwrap_or(0);
         if current_count < goal_count as i64 {
             credit_used += price as i64;
         }

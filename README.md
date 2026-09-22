@@ -42,6 +42,8 @@ pnpm dev
 
 `http://localhost:5173` をブラウザで開くとログイン画面が表示される。ベンチマーカーを
 ローカルで回す場合は [docs/authoring/dev-loop.md](docs/authoring/dev-loop.md) を参照。
+ベンチ結果からボトルネックを分析する手順は [docs/bench-log-analysis.md](docs/bench-log-analysis.md)
+にまとめてある。
 
 ## 注意事項
 

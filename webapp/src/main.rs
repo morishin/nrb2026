@@ -139,11 +139,15 @@ async fn main() {
     }
 
     let app = app.with_state(state).layer(
-        tower_http::trace::TraceLayer::new_for_http().on_response(
-            tower_http::trace::DefaultOnResponse::new()
-                .level(tracing::Level::INFO)
-                .latency_unit(tower_http::LatencyUnit::Millis),
-        ),
+        tower_http::trace::TraceLayer::new_for_http()
+            .make_span_with(
+                tower_http::trace::DefaultMakeSpan::new().level(tracing::Level::INFO),
+            )
+            .on_response(
+                tower_http::trace::DefaultOnResponse::new()
+                    .level(tracing::Level::INFO)
+                    .latency_unit(tower_http::LatencyUnit::Millis),
+            ),
     );
 
     // nrb2026 では nginx を置かず axum が直接 SPA + API を配信する設計のため、

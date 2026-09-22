@@ -9,6 +9,7 @@ ISUNARABE 合同演習2026 作問物の公開用ドキュメントの入口。
 3. [authoring/README.md](authoring/README.md) — 残っている作問関連メモの読み方
 4. [authoring/norms.md](authoring/norms.md) — ISUCON 競技規範とベンチマーカー慣習
 5. [authoring/dev-loop.md](authoring/dev-loop.md) — host 上での webapp / bench 反復ループ
+6. [manual.md](manual.md) — 合同演習2026 当日マニュアル (環境構築 / ベンチ走行 / 追試)
 
 ## 文書一覧
 
@@ -19,3 +20,4 @@ ISUNARABE 合同演習2026 作問物の公開用ドキュメントの入口。
 | [authoring/README.md](authoring/README.md) | 作問ガイドの読み方 | 初版 |
 | [authoring/norms.md](authoring/norms.md) | ISUCON 競技規範 + ベンチマーカー慣習 + スコア式 | 初版 |
 | [authoring/dev-loop.md](authoring/dev-loop.md) | host 上での webapp/bench 反復ループ | 初版 |
+| [manual.md](manual.md) | 合同演習2026 当日マニュアル | 配布版 |

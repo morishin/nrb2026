@@ -6,7 +6,8 @@
 --   * collation は utf8mb4_0900_ai_ci (MySQL 8.0 の素直なデフォルト。
 --     utf8mb4_bin は sqlx 0.8 の VARCHAR デコードと相性が悪く Vec<u8> として返ってきてしまう)
 --   * current_count / status / last_joined_at カラムは持たない (派生計算)
---   * 性能目的の二次 index は付けない (tags.name UNIQUE は name lookup のための例外)
+--   * 性能目的の二次 index: campaign_participants(campaign_id/user_id), charges(campaign_participant_id)
+--     を追加済み (チューニングで付与。tags.name UNIQUE はもとからの name lookup 用)
 --   * FK 制約は付けない (ISUCON 慣例)
 --   * charges.campaign_participant_id に UNIQUE を付けない (= 二重課金 critical の題材)
 --
@@ -46,14 +47,17 @@ CREATE TABLE `campaign_participants` (
     `campaign_id` CHAR(36) NOT NULL,
     `user_id` CHAR(36) NOT NULL,
     `created_at` DATETIME(6) NOT NULL,
-    PRIMARY KEY (`id`)
+    PRIMARY KEY (`id`),
+    KEY `idx_campaign_participants_campaign_id` (`campaign_id`),
+    KEY `idx_campaign_participants_user_id` (`user_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE TABLE `charges` (
     `id` CHAR(36) NOT NULL,
     `campaign_participant_id` CHAR(36) NOT NULL,
     `created_at` DATETIME(6) NOT NULL,
-    PRIMARY KEY (`id`)
+    PRIMARY KEY (`id`),
+    KEY `idx_charges_campaign_participant_id` (`campaign_participant_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE TABLE `tags` (

@@ -1165,48 +1165,36 @@ async fn hydrate_all_campaigns(pool: &MySqlPool) -> Result<Vec<CampaignRes>, App
 
 // get_me / join_campaign 向け: user が参加中の campaign のうち、まだ goal_count に
 // 達していない (= open) ものの price 合計 (credit_used) を計算する。
-// campaign ごとに price/goal_count 取得 + COUNT を個別発行する N+1 を避け、
-// JOIN + GROUP BY 1本にまとめる。
+//
+// campaign ごとに price/goal_count 取得 + COUNT を個別発行する N+1 な形のまま残している。
+// bench score で実測した結果、bulk 化 (self-join+GROUP BY 版、IN句版いずれも) の方が
+// 一貫して悪化した (528000 -> 451000-471000 の帯まで低下、CI 4回で再現)。campaign_participants
+// に index が付いている前提では各クエリは単純な index lookup で軽く、逆に IN 句版は
+// campaign_ids の個数ごとに SQL 文字列が変わり prepared statement のキャッシュが効かない
+// (self-join版は固定形だが、それでも悪化した=原因未確定) ため、素朴な形のままにしている。
 async fn credit_used_for_user(
     conn: &mut sqlx::MySqlConnection,
     user_id: &str,
 ) -> Result<i64, AppError> {
-    // campaign_participants x campaigns x campaign_participants の self-join + GROUP BY は
-    // 参加数が少ない (= ほとんどの user) 場合、毎回 temporary table を作るぶん逆に遅くなった
-    // (bench score で実測して退行を確認した)。IN 句によるバルク取得 (最大3クエリ) に置き換える。
     let campaign_ids: Vec<String> =
         sqlx::query_scalar("SELECT campaign_id FROM campaign_participants WHERE user_id = ?")
             .bind(user_id)
             .fetch_all(&mut *conn)
             .await?;
-    if campaign_ids.is_empty() {
-        return Ok(0);
-    }
-
-    let placeholders = vec!["?"; campaign_ids.len()].join(",");
-
-    let campaign_sql =
-        format!("SELECT id, price, goal_count FROM campaigns WHERE id IN ({placeholders})");
-    let mut q = sqlx::query_as::<_, (String, i32, i32)>(&campaign_sql);
-    for cid in &campaign_ids {
-        q = q.bind(cid);
-    }
-    let campaign_rows: Vec<(String, i32, i32)> = q.fetch_all(&mut *conn).await?;
-
-    let count_sql = format!(
-        "SELECT campaign_id, COUNT(*) FROM campaign_participants \
-         WHERE campaign_id IN ({placeholders}) GROUP BY campaign_id"
-    );
-    let mut q = sqlx::query_as::<_, (String, i64)>(&count_sql);
-    for cid in &campaign_ids {
-        q = q.bind(cid);
-    }
-    let counts: HashMap<String, i64> = q.fetch_all(&mut *conn).await?.into_iter().collect();
-
     let mut credit_used: i64 = 0;
-    for (id, price, goal_count) in campaign_rows {
-        let current_count = counts.get(&id).copied().unwrap_or(0);
-        if current_count < goal_count as i64 {
+    for cid in campaign_ids {
+        let row = sqlx::query("SELECT price, goal_count FROM campaigns WHERE id = ?")
+            .bind(&cid)
+            .fetch_one(&mut *conn)
+            .await?;
+        let price: i32 = row.try_get("price")?;
+        let goal_count: i32 = row.try_get("goal_count")?;
+        let (count,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM campaign_participants WHERE campaign_id = ?")
+                .bind(&cid)
+                .fetch_one(&mut *conn)
+                .await?;
+        if (count as i32) < goal_count {
             credit_used += price as i64;
         }
     }

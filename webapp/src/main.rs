@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize, Serializer};
 use sha2::Digest as _;
 use sqlx::mysql::{MySqlPool, MySqlPoolOptions};
 use sqlx::Row;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -544,17 +544,7 @@ async fn list_campaigns(
     };
 
     // 全 campaign 行を hydrate (LIMIT は最後)
-    let id_rows: Vec<(String,)> = sqlx::query_as("SELECT id FROM campaigns")
-        .fetch_all(&state.pool)
-        .await?;
-    let mut conn = state.pool.acquire().await?;
-    let mut all: Vec<CampaignRes> = Vec::new();
-    for (cid,) in id_rows {
-        if let Some(c) = hydrate_campaign(&mut conn, &cid).await? {
-            all.push(c);
-        }
-    }
-    drop(conn);
+    let mut all: Vec<CampaignRes> = hydrate_all_campaigns(&state.pool).await?;
 
     // フィルタ (status=open + tag AND)
     let want: HashSet<&str> = tag_filter.iter().map(|s| s.as_str()).collect();
@@ -1123,6 +1113,77 @@ async fn hydrate_campaign_via_pool(
 ) -> Result<Option<CampaignRes>, AppError> {
     let mut conn = pool.acquire().await?;
     hydrate_campaign(&mut conn, id).await
+}
+
+// list_campaigns 向け: 全 campaign を hydrate_campaign 相当の内容で組み立てるが、
+// campaign 数 N に対して定数本 (3本) のクエリで済ませる (N+1 対策)。
+// tags / participants は campaign_id ごとにグループ化するだけで、1 campaign あたりの
+// 計算内容 (current_count / last_joined_at / status) は hydrate_campaign と同一。
+async fn hydrate_all_campaigns(pool: &MySqlPool) -> Result<Vec<CampaignRes>, AppError> {
+    let campaign_rows: Vec<(String, String, String, i32, i32, NaiveDateTime)> = sqlx::query_as(
+        "SELECT id, name, description, price, goal_count, created_at FROM campaigns",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let tag_rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT ct.campaign_id, t.name FROM campaign_tags ct JOIN tags t ON ct.tag_id = t.id",
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut tags_by_campaign: HashMap<String, Vec<String>> = HashMap::new();
+    for (cid, name) in tag_rows {
+        tags_by_campaign.entry(cid).or_default().push(name);
+    }
+
+    // created_at ASC を campaign_id ごとにも保つよう、まず campaign_id で並べてから
+    // created_at で並べる (hydrate_campaign の ORDER BY cp.created_at ASC と同じ順序を
+    // campaign ごとに再現するため)。
+    let part_rows: Vec<(String, String, String, NaiveDateTime)> = sqlx::query_as(
+        "SELECT cp.campaign_id, cp.user_id, u.name, cp.created_at \
+         FROM campaign_participants cp JOIN users u ON cp.user_id = u.id \
+         ORDER BY cp.campaign_id, cp.created_at ASC",
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut participants_by_campaign: HashMap<String, Vec<ParticipantRes>> = HashMap::new();
+    for (cid, uid, name, t) in part_rows {
+        participants_by_campaign
+            .entry(cid)
+            .or_default()
+            .push(ParticipantRes {
+                user_id: uid,
+                name,
+                joined_at: t,
+            });
+    }
+
+    let mut all = Vec::with_capacity(campaign_rows.len());
+    for (id, name, description, price, goal_count, created_at) in campaign_rows {
+        let tags = tags_by_campaign.remove(&id).unwrap_or_default();
+        let participants = participants_by_campaign.remove(&id).unwrap_or_default();
+        let current_count = participants.len() as i32;
+        let last_joined_at = participants.last().map(|p| p.joined_at);
+        let status = if current_count >= goal_count {
+            "closed"
+        } else {
+            "open"
+        };
+        all.push(CampaignRes {
+            id,
+            name,
+            description,
+            price,
+            goal_count,
+            current_count,
+            tags,
+            status: status.to_string(),
+            created_at,
+            last_joined_at,
+            participants,
+        });
+    }
+    Ok(all)
 }
 
 #[cfg(test)]

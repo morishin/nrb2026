@@ -14,6 +14,15 @@ GitHub Actions (push トリガー) のベンチは1回あたり約10分かかる
 `scripts/dev-bench.sh` で素早く反復する。remote (GitHub Actions) のベンチはたまに回し、
 その完了を待っている間もローカルでの改善作業を並行して進めてよい。
 
+**注意: bench score は local/remote いずれも実行毎のブレがかなり大きい。** 実測例:
+ローカルで無変更のまま3連続実行して 157000 → 77000 → 41000、GitHub Actions で
+コード変更なしの同一コミットを再実行して 528000 → 702000 (+33%)。1回の実行結果だけで
+「改善した/悪化した」と判断しない。判断材料としては:
+- 変更の妥当性を `EXPLAIN` / `EXPLAIN ANALYZE` やクエリ発行回数 (slow query log) など
+  score 以外の指標でも裏付ける
+- score で比較するときは複数回実行してベスト値 (または傾向) を見る
+- 数十%以内の差は noise の範囲の可能性を疑う
+
 ## スコア改善の記録ルール
 
 ベンチマーカー (ローカルの `scripts/dev-bench.sh`、または push 後の GitHub Actions) で

@@ -460,30 +460,8 @@ async fn get_me(
     let (name, credit_limit) = row.ok_or(AppError::Unauthorized)?;
 
     // credit_used: 自分が participants にいて current_count < goal_count な campaigns の price 合計。
-    let part_rows: Vec<(String,)> = sqlx::query_as(
-        "SELECT campaign_id FROM campaign_participants WHERE user_id = ?",
-    )
-    .bind(user_id.to_string())
-    .fetch_all(&state.pool)
-    .await?;
-    let mut credit_used: i64 = 0;
-    for (cid,) in part_rows {
-        let row = sqlx::query("SELECT price, goal_count FROM campaigns WHERE id = ?")
-            .bind(&cid)
-            .fetch_one(&state.pool)
-            .await?;
-        let price: i32 = row.try_get("price")?;
-        let goal_count: i32 = row.try_get("goal_count")?;
-        let (count,): (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM campaign_participants WHERE campaign_id = ?",
-        )
-        .bind(&cid)
-        .fetch_one(&state.pool)
-        .await?;
-        if (count as i32) < goal_count {
-            credit_used += price as i64;
-        }
-    }
+    let mut conn = state.pool.acquire().await?;
+    let credit_used = credit_used_for_user(&mut conn, &user_id.to_string()).await?;
 
     Ok(Json(MeRes {
         id: user_id.to_string(),
@@ -778,30 +756,7 @@ async fn join_campaign(
     // credit_used に対して判定。step 5 を通過したのでこの user は campaign_id にまだ含まれず、
     // 集計時点で「自分のまだ未追加の participant 行」は除外されている。
     // 最後の 1 人で即 close になるケースでも、close による自分自身の refund を先取りせず判定する。
-    let part_rows: Vec<(String,)> = sqlx::query_as(
-        "SELECT campaign_id FROM campaign_participants WHERE user_id = ?",
-    )
-    .bind(user_id.to_string())
-    .fetch_all(&mut *tx)
-    .await?;
-    let mut before_credit_used: i64 = 0;
-    for (cid,) in part_rows {
-        let row = sqlx::query("SELECT price, goal_count FROM campaigns WHERE id = ?")
-            .bind(&cid)
-            .fetch_one(&mut *tx)
-            .await?;
-        let p: i32 = row.try_get("price")?;
-        let g: i32 = row.try_get("goal_count")?;
-        let (count,): (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM campaign_participants WHERE campaign_id = ?",
-        )
-        .bind(&cid)
-        .fetch_one(&mut *tx)
-        .await?;
-        if (count as i32) < g {
-            before_credit_used += p as i64;
-        }
-    }
+    let before_credit_used = credit_used_for_user(&mut *tx, &user_id.to_string()).await?;
     if before_credit_used as i32 + price > credit_limit {
         return Err(AppError::PaymentRequired);
     }
@@ -1184,6 +1139,34 @@ async fn hydrate_all_campaigns(pool: &MySqlPool) -> Result<Vec<CampaignRes>, App
         });
     }
     Ok(all)
+}
+
+// get_me / join_campaign 向け: user が参加中の campaign のうち、まだ goal_count に
+// 達していない (= open) ものの price 合計 (credit_used) を計算する。
+// campaign ごとに price/goal_count 取得 + COUNT を個別発行する N+1 を避け、
+// JOIN + GROUP BY 1本にまとめる。
+async fn credit_used_for_user(
+    conn: &mut sqlx::MySqlConnection,
+    user_id: &str,
+) -> Result<i64, AppError> {
+    let rows: Vec<(i32, i32, i64)> = sqlx::query_as(
+        "SELECT c.price, c.goal_count, COUNT(cp2.id) AS current_count \
+         FROM campaign_participants cp \
+         JOIN campaigns c ON cp.campaign_id = c.id \
+         JOIN campaign_participants cp2 ON cp2.campaign_id = c.id \
+         WHERE cp.user_id = ? \
+         GROUP BY c.id, c.price, c.goal_count",
+    )
+    .bind(user_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut credit_used: i64 = 0;
+    for (price, goal_count, current_count) in rows {
+        if current_count < goal_count as i64 {
+            credit_used += price as i64;
+        }
+    }
+    Ok(credit_used)
 }
 
 #[cfg(test)]
